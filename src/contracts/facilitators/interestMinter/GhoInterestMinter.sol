@@ -79,27 +79,40 @@ contract GhoInterestMinter is IGhoInterestMinter {
 
   /// @inheritdoc IGhoFacilitator
   function distributeFeesToTreasury() external {
+    // collects GHO interest revenue from the AAVE aEthGho facilitator
     GHO_ATOKEN.distributeFeesToTreasury();
 
+    // requires _ghoTreasury on aEthGho to be set to the GhoInterestMinter
+    // for the burning logic to be enforceable.
+
     uint256 balance = GHO_TOKEN.balanceOf(address(this));
-    uint256 debtSupply = GHO_VTOKEN.totalSupply();
-    uint256 ghoSupply = GHO_TOKEN.totalSupply();
+    uint256 totalDebt = GHO_VTOKEN.totalSupply();
+    (, uint256 ghoBorrowed) = IGhoToken(GHO_TOKEN).getFacilitatorBucket(address(GHO_ATOKEN));
+    (uint256 capacity, uint256 ghoMinted) = IGhoToken(GHO_TOKEN).getFacilitatorBucket(
+      address(this)
+    );
 
-    if (debtSupply < ghoSupply + _threshold) {
-      uint256 excessAmount = (ghoSupply + _threshold - debtSupply);
-      uint256 amountToBurn = excessAmount < balance ? excessAmount : balance;
-
-      require(interestMinted < amountToBurn, 'something very wrong is going on!');
-      GHO_TOKEN.burn(amountToBurn);
-      GHO_TOKEN.transfer(_ghoTreasury, balance - amountToBurn);
-      emit InterestMintedUpdated(interestMinted, interestMinted - amountToBurn);
-      interestMinted -= amountToBurn;
-    } else {
-      uint256 amountToMint = (debtSupply - ghoSupply - _threshold);
+    // if the compounding debt is higher than gho borrowed
+    // and the facilitator has enough capacity we can mint unrealized interest
+    // else if the compounding debt is lower than gho borrowed we need to burn gho
+    if (totalDebt > ghoBorrowed && capacity > ghoMinted) {
+      // mint totalDebt-ghoBorrowed up until facilitator cap
+      uint256 amountToMint = (totalDebt - ghoBorrowed) < (capacity - ghoMinted)
+        ? (totalDebt - ghoBorrowed)
+        : (capacity - ghoMinted);
       GHO_TOKEN.mint(_ghoTreasury, amountToMint);
       GHO_TOKEN.transfer(_ghoTreasury, balance);
-      emit InterestMintedUpdated(interestMinted, interestMinted + amountToMint);
-      interestMinted += amountToMint;
+    } else {
+      // burn ghoBorrowed-totalDebt
+      uint256 excessAmount = (ghoBorrowed - totalDebt) < ghoMinted
+        ? (ghoBorrowed - totalDebt)
+        : ghoMinted;
+
+      uint256 amountToBurn = excessAmount < balance ? excessAmount : balance;
+      GHO_TOKEN.burn(amountToBurn);
+      if (balance - amountToBurn > 0) {
+        GHO_TOKEN.transfer(_ghoTreasury, balance - amountToBurn);
+      }
     }
   }
 
@@ -124,7 +137,7 @@ contract GhoInterestMinter is IGhoInterestMinter {
   }
 
   function _updateThreshold(uint256 newThreshold) internal {
-    require(newThreshold <= MAX_THRESHOLD, 'FlashMinter: Threshold out of range');
+    require(newThreshold <= MAX_THRESHOLD, 'InterestMinter: Threshold out of range');
     uint256 oldThreshold = _threshold;
     _threshold = newThreshold;
     emit ThresholdUpdated(oldThreshold, newThreshold);
